@@ -47,6 +47,8 @@ const (
 	// EventDetectedUnhealthy is emitted in case a node associated with a
 	// machine was detected unhealthy.
 	EventDetectedUnhealthy string = "DetectedUnhealthy"
+	// EventRemediationTriggered is emitted when MachineHealthCheck triggers remediation for an unhealthy machine.
+	EventRemediationTriggered string = "RemediationTriggered"
 )
 
 var (
