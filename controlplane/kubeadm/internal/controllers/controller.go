@@ -489,6 +489,10 @@ func (r *KubeadmControlPlaneReconciler) reconcile(ctx context.Context, controlPl
 		for machine, machineUpToDateResult := range machinesUpToDateResults {
 			allMessages = append(allMessages, fmt.Sprintf("Machine %s needs rollout: %s", machine, strings.Join(machineUpToDateResult.LogMessages, ",")))
 		}
+
+		// Emit CertificateRenewalTriggered event (only on first detection)
+		r.emitCertificateRenewalTriggeredEvent(ctx, controlPlane, machinesUpToDateResults)
+
 		log.Info(fmt.Sprintf("Rolling out Control Plane machines: %s", strings.Join(allMessages, ",")), "machinesNeedingRollout", machinesNeedingRollout.Names())
 		v1beta1conditions.MarkFalse(controlPlane.KCP, controlplanev1.MachinesSpecUpToDateV1Beta1Condition, controlplanev1.RollingUpdateInProgressV1Beta1Reason, clusterv1.ConditionSeverityWarning, "Rolling %d replicas with outdated spec (%d replicas up to date)", len(machinesNeedingRollout), len(controlPlane.Machines)-len(machinesNeedingRollout))
 		return r.updateControlPlane(ctx, controlPlane, machinesNeedingRollout, machinesUpToDateResults)

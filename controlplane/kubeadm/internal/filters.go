@@ -35,6 +35,11 @@ import (
 	"sigs.k8s.io/cluster-api/util/collections"
 )
 
+const (
+	CertificatesExpirySoonMessage = "Certificates will expire soon"
+	RolloutAfterExpiredMessage    = "KubeadmControlPlane spec.rolloutAfter expired"
+)
+
 // UpToDateResult is the result of calling the UpToDate func for a Machine.
 type UpToDateResult struct {
 	LogMessages              []string
@@ -73,7 +78,7 @@ func UpToDate(
 	// Machines whose certificates are about to expire.
 	if collections.ShouldRolloutBefore(reconciliationTime, kcp.Spec.Rollout.Before)(machine) {
 		res.LogMessages = append(res.LogMessages, "certificates will expire soon, rolloutBefore expired")
-		res.ConditionMessages = append(res.ConditionMessages, "Certificates will expire soon")
+		res.ConditionMessages = append(res.ConditionMessages, CertificatesExpirySoonMessage)
 		res.EligibleForInPlaceUpdate = false
 	}
 
@@ -81,7 +86,7 @@ func UpToDate(
 	// the RolloutAfter deadline is expired, and the machine was created before the deadline).
 	if collections.ShouldRolloutAfter(reconciliationTime, kcp.Spec.Rollout.After)(machine) {
 		res.LogMessages = append(res.LogMessages, "rolloutAfter expired")
-		res.ConditionMessages = append(res.ConditionMessages, "KubeadmControlPlane spec.rolloutAfter expired")
+		res.ConditionMessages = append(res.ConditionMessages, RolloutAfterExpiredMessage)
 		res.EligibleForInPlaceUpdate = false
 	}
 

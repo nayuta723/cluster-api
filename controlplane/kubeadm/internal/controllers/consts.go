@@ -30,4 +30,12 @@ const (
 	// dependentCertRequeueAfter is how long to wait before checking again to see if
 	// dependent certificates have been created.
 	dependentCertRequeueAfter = 30 * time.Second
+
+	// CertificatesExpiringReason is the event reason when certificates are expiring soon
+	// and rollout is triggered (RolloutBefore).
+	CertificatesExpiringReason = "CertificatesExpiring"
+
+	// CertificatesExpiredReason is the event reason when certificates have already expired
+	// and rollout is triggered (RolloutAfter).
+	CertificatesExpiredReason = "CertificatesExpired"
 )

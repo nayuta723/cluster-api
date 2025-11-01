@@ -18,6 +18,8 @@ package controllers
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/gomega"
@@ -787,6 +789,249 @@ func TestKubeadmControlPlaneReconciler_adoptKubeconfigSecret(t *testing.T) {
 			actualSecret := &corev1.Secret{}
 			g.Expect(fakeClient.Get(ctx, client.ObjectKey{Namespace: tt.configSecret.Namespace, Name: tt.configSecret.Name}, actualSecret)).To(Succeed())
 			g.Expect(actualSecret.GetOwnerReferences()).To(ConsistOf(tt.expectedOwnerRef))
+		})
+	}
+}
+
+func TestEmitCertificateRenewalTriggeredEvent(t *testing.T) {
+	tests := []struct {
+		name                    string
+		machinesUpToDateResults map[string]internal.UpToDateResult
+		rollingOutCondition     *metav1.Condition
+		v1beta1Condition        *clusterv1.Condition
+		certificatesExpiryDays  int32
+		expectedEventCount      int
+		expectedEventReason     string
+		expectedMachinesInEvent []string
+		expectedDaysInEvent     int32
+	}{
+		{
+			name: "should emit event when certificate renewal is detected for the first time",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Certificates will expire soon",
+					},
+				},
+			},
+			rollingOutCondition:     nil, // No RollingOut condition exists yet
+			v1beta1Condition:        nil, // No v1beta1 condition exists yet
+			certificatesExpiryDays:  30,
+			expectedEventCount:      1,
+			expectedEventReason:     "CertificatesExpiring",
+			expectedMachinesInEvent: []string{"machine-1"},
+			expectedDaysInEvent:     30,
+		},
+		{
+			name: "should emit event for multiple machines",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Certificates will expire soon",
+					},
+				},
+				"machine-2": {
+					ConditionMessages: []string{
+						"Certificates will expire soon",
+					},
+				},
+			},
+			rollingOutCondition:     nil,
+			v1beta1Condition:        nil,
+			certificatesExpiryDays:  30,
+			expectedEventCount:      1,
+			expectedEventReason:     "CertificatesExpiring",
+			expectedMachinesInEvent: []string{"machine-1", "machine-2"},
+			expectedDaysInEvent:     30,
+		},
+		{
+			name: "should not emit event when already rolling out (v2 RollingOutCondition=True)",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Certificates will expire soon",
+					},
+				},
+			},
+			rollingOutCondition: &metav1.Condition{
+				Type:   controlplanev1.KubeadmControlPlaneRollingOutCondition,
+				Status: metav1.ConditionTrue,
+			},
+			v1beta1Condition:       nil,
+			certificatesExpiryDays: 30,
+			expectedEventCount:     0,
+		},
+		{
+			name: "should not emit event when already rolling out (v1beta1 MachinesSpecUpToDate=False)",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Certificates will expire soon",
+					},
+				},
+			},
+			rollingOutCondition: nil,
+			v1beta1Condition: &clusterv1.Condition{
+				Type:   controlplanev1.MachinesSpecUpToDateV1Beta1Condition,
+				Status: corev1.ConditionFalse,
+			},
+			certificatesExpiryDays: 30,
+			expectedEventCount:     0,
+		},
+		{
+			name: "should not emit event when no certificate renewal detected",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Version mismatch",
+					},
+				},
+			},
+			rollingOutCondition:    nil,
+			v1beta1Condition:       nil,
+			certificatesExpiryDays: 30,
+			expectedEventCount:     0,
+		},
+		{
+			name:                    "should not emit event when no machines need rollout",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{},
+			rollingOutCondition:     nil,
+			v1beta1Condition:        nil,
+			certificatesExpiryDays:  30,
+			expectedEventCount:      0,
+		},
+		{
+			name: "should emit CertificatesExpired event when certificates have already expired",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Certificates have expired",
+					},
+				},
+			},
+			rollingOutCondition:     nil,
+			v1beta1Condition:        nil,
+			certificatesExpiryDays:  30,
+			expectedEventCount:      1,
+			expectedEventReason:     "CertificatesExpired",
+			expectedMachinesInEvent: []string{"machine-1"},
+		},
+		{
+			name: "should emit CertificatesExpired event for multiple machines with expired certificates",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Certificates have expired",
+					},
+				},
+				"machine-2": {
+					ConditionMessages: []string{
+						"Certificates have expired",
+					},
+				},
+			},
+			rollingOutCondition:     nil,
+			v1beta1Condition:        nil,
+			certificatesExpiryDays:  30,
+			expectedEventCount:      1,
+			expectedEventReason:     "CertificatesExpired",
+			expectedMachinesInEvent: []string{"machine-1", "machine-2"},
+		},
+		{
+			name: "should emit both events when some certificates are expiring and some have expired",
+			machinesUpToDateResults: map[string]internal.UpToDateResult{
+				"machine-1": {
+					ConditionMessages: []string{
+						"Certificates will expire soon",
+					},
+				},
+				"machine-2": {
+					ConditionMessages: []string{
+						"Certificates have expired",
+					},
+				},
+			},
+			rollingOutCondition:     nil,
+			v1beta1Condition:        nil,
+			certificatesExpiryDays:  30,
+			expectedEventCount:      2,
+			expectedEventReason:     "CertificatesExpiring", // First event reason
+			expectedMachinesInEvent: []string{"machine-1", "machine-2"},
+			expectedDaysInEvent:     30,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			// Create a fake event recorder
+			fakeRecorder := record.NewFakeRecorder(10)
+
+			// Create KCP with certificate expiry days
+			kcp := &controlplanev1.KubeadmControlPlane{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-kcp",
+					Namespace: metav1.NamespaceDefault,
+				},
+				Spec: controlplanev1.KubeadmControlPlaneSpec{
+					Rollout: controlplanev1.KubeadmControlPlaneRolloutSpec{
+						Before: controlplanev1.KubeadmControlPlaneRolloutBeforeSpec{
+							CertificatesExpiryDays: tt.certificatesExpiryDays,
+						},
+					},
+				},
+			}
+
+			if tt.rollingOutCondition != nil {
+				kcp.Status.Conditions = []metav1.Condition{*tt.rollingOutCondition}
+			}
+			if tt.v1beta1Condition != nil {
+				kcp.SetV1Beta1Conditions([]clusterv1.Condition{*tt.v1beta1Condition})
+			}
+
+			// Create control plane
+			controlPlane := &internal.ControlPlane{
+				KCP: kcp,
+			}
+
+			// Create reconciler with fake recorder
+			r := &KubeadmControlPlaneReconciler{
+				recorder: fakeRecorder,
+			}
+
+			// Call the function
+			r.emitCertificateRenewalTriggeredEvent(context.Background(), controlPlane, tt.machinesUpToDateResults)
+
+			// Verify events
+			events := []string{}
+			close(fakeRecorder.Events)
+			for event := range fakeRecorder.Events {
+				events = append(events, event)
+			}
+
+			g.Expect(events).To(HaveLen(tt.expectedEventCount))
+			if tt.expectedEventCount > 0 {
+				// Verify event reason
+				g.Expect(events[0]).To(ContainSubstring(tt.expectedEventReason))
+
+				// For CertificatesExpiring events, verify days threshold
+				if tt.expectedEventReason == "CertificatesExpiring" {
+					g.Expect(events[0]).To(ContainSubstring("certificates expiring within"))
+					g.Expect(events[0]).To(ContainSubstring(fmt.Sprintf("%d days", tt.expectedDaysInEvent)))
+				}
+
+				// For CertificatesExpired events, verify expired message
+				if tt.expectedEventReason == "CertificatesExpired" {
+					g.Expect(events[0]).To(ContainSubstring("expired certificates"))
+				}
+
+				// Verify machines are mentioned in events
+				allEvents := strings.Join(events, " ")
+				for _, machine := range tt.expectedMachinesInEvent {
+					g.Expect(allEvents).To(ContainSubstring(machine))
+				}
+			}
 		})
 	}
 }

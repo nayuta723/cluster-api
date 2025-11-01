@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/cluster-api/internal/util/ssa"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/certs"
+	"sigs.k8s.io/cluster-api/util/conditions"
 	v1beta1conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/kubeconfig"
 	"sigs.k8s.io/cluster-api/util/patch"
@@ -301,4 +302,86 @@ func (r *KubeadmControlPlaneReconciler) updateMachine(ctx context.Context, machi
 		return nil, err
 	}
 	return updatedMachine, nil
+}
+
+// emitCertificateRenewalTriggeredEvent detects certificate renewal triggers and emits an event.
+// This function checks ConditionMessages for certificate expiry and uses condition state transitions
+// to ensure the event is emitted only once per rollout cycle.
+// Note: The message format "Certificates will expire soon" is set in filters.go.
+func (r *KubeadmControlPlaneReconciler) emitCertificateRenewalTriggeredEvent(
+	ctx context.Context,
+	controlPlane *internal.ControlPlane,
+	machinesUpToDateResults map[string]internal.UpToDateResult,
+) {
+	// Check if certificate renewal is the reason for rollout
+	certificatesExpiring := []string{}
+	certificatesExpired := []string{}
+
+	for machineName, result := range machinesUpToDateResults {
+		for _, msg := range result.ConditionMessages {
+			if strings.Contains(msg, internal.CertificatesExpirySoonMessage) {
+				certificatesExpiring = append(certificatesExpiring, machineName)
+			}
+			if strings.Contains(msg, internal.RolloutAfterExpiredMessage) {
+				certificatesExpired = append(certificatesExpired, machineName)
+			}
+		}
+	}
+
+	// No certificate renewal detected
+	if len(certificatesExpiring) == 0 && len(certificatesExpired) == 0 {
+		return
+	}
+
+	// Check v2 RollingOutCondition (if exists)
+	rollingOutCondition := conditions.Get(controlPlane.KCP, controlplanev1.KubeadmControlPlaneRollingOutCondition)
+	if rollingOutCondition != nil && rollingOutCondition.Status == metav1.ConditionTrue {
+		// Already rolling out, don't emit duplicate event
+		return
+	}
+
+	// Check v1beta1 MachinesSpecUpToDateCondition (fallback for backward compatibility)
+	v1beta1Condition := v1beta1conditions.Get(controlPlane.KCP, controlplanev1.MachinesSpecUpToDateV1Beta1Condition)
+	if v1beta1Condition != nil && v1beta1Condition.Status == corev1.ConditionFalse {
+		// Already rolling out, don't emit duplicate event
+		return
+	}
+
+	// Emit event for expiring certificates (RolloutBefore)
+	if len(certificatesExpiring) > 0 {
+		daysThreshold := controlPlane.KCP.Spec.Rollout.Before.CertificatesExpiryDays
+
+		if len(certificatesExpiring) == 1 {
+			r.recorder.Eventf(controlPlane.KCP, corev1.EventTypeWarning, CertificatesExpiringReason,
+				"Machine %s has certificates expiring within %d days and will be rolled out",
+				certificatesExpiring[0], daysThreshold)
+		} else if len(certificatesExpiring) <= 3 {
+			r.recorder.Eventf(controlPlane.KCP, corev1.EventTypeWarning, CertificatesExpiringReason,
+				"%d Machines have certificates expiring within %d days and will be rolled out: %s",
+				len(certificatesExpiring), daysThreshold, strings.Join(certificatesExpiring, ", "))
+		} else {
+			r.recorder.Eventf(controlPlane.KCP, corev1.EventTypeWarning, CertificatesExpiringReason,
+				"%d Machines have certificates expiring within %d days and will be rolled out: %s, ... (%d more)",
+				len(certificatesExpiring), daysThreshold,
+				strings.Join(certificatesExpiring[:3], ", "), len(certificatesExpiring)-3)
+		}
+	}
+
+	// Emit event for expired certificates (RolloutAfter)
+	if len(certificatesExpired) > 0 {
+		if len(certificatesExpired) == 1 {
+			r.recorder.Eventf(controlPlane.KCP, corev1.EventTypeWarning, CertificatesExpiredReason,
+				"Machine %s has expired certificates and will be rolled out",
+				certificatesExpired[0])
+		} else if len(certificatesExpired) <= 3 {
+			r.recorder.Eventf(controlPlane.KCP, corev1.EventTypeWarning, CertificatesExpiredReason,
+				"%d Machines have expired certificates and will be rolled out: %s",
+				len(certificatesExpired), strings.Join(certificatesExpired, ", "))
+		} else {
+			r.recorder.Eventf(controlPlane.KCP, corev1.EventTypeWarning, CertificatesExpiredReason,
+				"%d Machines have expired certificates and will be rolled out: %s, ... (%d more)",
+				len(certificatesExpired),
+				strings.Join(certificatesExpired[:3], ", "), len(certificatesExpired)-3)
+		}
+	}
 }
